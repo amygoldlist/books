@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MyBookFinder</title>
+  <meta name="description" content="Find any book at Vancouver Public Library, Kobo Plus, or the Kobo Store.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ══ HEADER / HERO ══ -->
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="logo">
+        <span class="logo-icon" aria-hidden="true">📚</span>
+        <span class="logo-text">MyBookFinder</span>
+      </div>
+      <p class="tagline">Check your library, subscription, and store — all at once.</p>
+
+      <form id="search-form" class="search-form" novalidate>
+        <div class="search-row">
+          <input
+            type="search"
+            id="search-input"
+            class="search-input"
+            placeholder="Search by title or author…"
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck="false"
+            aria-label="Book title or author"
+          >
+          <button type="submit" class="search-btn" aria-label="Search">
+            <svg class="search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="2"/>
+              <line x1="12.5" y1="12.5" x2="17" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            Search
+          </button>
+        </div>
+
+        <fieldset class="search-type-group">
+          <legend class="sr-only">Search by</legend>
+          <label class="radio-label">
+            <input type="radio" name="searchType" value="title" checked>
+            <span>Title</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="searchType" value="author">
+            <span>Author</span>
+          </label>
+        </fieldset>
+      </form>
+    </div>
+  </header>
+
+  <!-- ══ RESULTS ══ -->
+  <main id="results" class="results" hidden>
+
+    <!-- Book metadata from Open Library -->
+    <section id="book-meta" class="book-meta" aria-live="polite"></section>
+
+    <!-- Source cards -->
+    <section class="cards-section">
+      <h2 class="cards-heading">
+        Availability results for <em id="query-display"></em>
+      </h2>
+      <div id="cards-grid" class="cards-grid" role="list"></div>
+    </section>
+
+  </main>
+
+  <!-- ══ FOOTER ══ -->
+  <footer class="site-footer">
+    <p>MyBookFinder &mdash; links open in a new tab &mdash; not affiliated with VPL or Kobo</p>
+    <p class="footer-note">Book metadata from <a href="https://openlibrary.org" target="_blank" rel="noopener">Open Library</a> (CC BY).</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
