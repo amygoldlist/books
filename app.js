@@ -399,14 +399,68 @@ async function fetchKoboData(title, signal) {
   const html = data.contents || '';
   if ((data.status?.http_code ?? 200) >= 500) throw new Error('kobo error');
 
-  // Kobo renders "or free on Kobo Plus" / "FREE with Kobo Plus" on every Plus title
-  if (/free (?:on|with) kobo plus/i.test(html)) return { status: 'found' };
+  // ── Pass 1: literal badge text (works when SSR includes it) ───────────────
+  if (/free (?:with|on) kobo\s*plus/i.test(html)) return { status: 'found' };
 
-  // Got a real page back, no Plus phrase → not in subscription
-  if (html.length > 5000) return { status: 'not-found' };
+  // ── Pass 2: __NEXT_DATA__ ─────────────────────────────────────────────────
+  // Kobo is a Next.js app. Every SSR page contains a <script id="__NEXT_DATA__">
+  // with the full data payload that React uses to hydrate the page.
+  // If this tag is absent we got a bot-challenge page, not real Kobo content.
+  const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
+  if (!ndMatch) return { status: 'unknown' };   // blocked / not a real Kobo page
 
-  // Very short / empty — proxy likely failed
+  const rawNd = ndMatch[1];
+
+  // 2a. Search the raw JSON string for explicit Plus field names.
+  //     Kobo's data model may use any of these.
+  if (/koboPlus[^a-zA-Z]|"isKoboPlus"\s*:\s*true|isFreeWithSubscription|FREE_WITH_SUBSCRIPTION/i.test(rawNd)) {
+    return { status: 'found' };
+  }
+
+  // 2b. We searched with fcis_kobo_plus=true, so ANY results = the book is on Plus.
+  //     Parse the data and look for result counts / items arrays.
+  try {
+    const nd = JSON.parse(rawNd);
+    const hit = findResultsInNextData(nd);
+    if (hit === true)  return { status: 'found' };
+    if (hit === false) return { status: 'not-found' };
+  } catch { /* malformed JSON — fall through */ }
+
+  // 2c. Fast string heuristics on the raw JSON if parsing failed
+  if (/"items"\s*:\s*\[\s*\{/.test(rawNd))        return { status: 'found' };     // non-empty
+  if (/"items"\s*:\s*\[\s*\]/.test(rawNd))         return { status: 'not-found' }; // empty
+  if (/"totalCount"\s*:\s*0\b/.test(rawNd))        return { status: 'not-found' };
+  if (/"totalCount"\s*:\s*[1-9]/.test(rawNd))      return { status: 'found' };
+
+  // Have real Kobo HTML but genuinely can't determine
   return { status: 'unknown' };
+}
+
+/**
+ * Walk the Next.js pageProps looking for search result arrays or total counts.
+ * Returns true (results found), false (zero results), or null (can't tell).
+ */
+function findResultsInNextData(nd) {
+  const pp = nd?.props?.pageProps;
+  if (!pp) return null;
+
+  // Try several common shapes Kobo might use
+  for (const candidate of [
+    pp.searchResults, pp.results,
+    pp.data?.searchResults, pp.data,
+    pp,
+  ]) {
+    if (!candidate || typeof candidate !== 'object') continue;
+
+    const total = candidate.totalCount ?? candidate.ResultCount
+               ?? candidate.total     ?? candidate.count;
+    if (typeof total === 'number') return total > 0;
+
+    const arr = candidate.items ?? candidate.books
+             ?? candidate.Items ?? candidate.Books ?? candidate.results;
+    if (Array.isArray(arr)) return arr.length > 0;
+  }
+  return null;
 }
 
 /* ══════════════════════════════════════════════
