@@ -228,11 +228,11 @@ async function autoCheckKoboPlus(query, signal) {
     if (signal.aborted) return;
 
     if      (result.status === 'found')
-      setKoboStatus('found',     `✅ Available on Kobo Plus${result.count ? ` (${result.count})` : ''}`);
+      setKoboStatus('found',     '✅ Free on Kobo Plus!');
     else if (result.status === 'not-found')
-      setKoboStatus('not-found', '❌ Not found on Kobo Plus');
+      setKoboStatus('not-found', '❌ Not on Kobo Plus');
     else
-      setKoboStatus('unknown',   '⚠️ Couldn\'t auto-check — open to verify');
+      setKoboStatus('unknown',   '⚠️ Couldn\'t check — open to verify');
   } catch (err) {
     if (err.name === 'AbortError') return;
     setKoboStatus('unknown', '⚠️ Couldn\'t auto-check — open to verify');
@@ -262,47 +262,19 @@ async function fetchKoboData(query, signal) {
   const html = data.contents || '';
   if ((data.status?.http_code ?? 200) >= 500) throw new Error('kobo server error');
 
-  // Strategy 1: Next.js __NEXT_DATA__
-  const nd = tryParseNextData(html);
-  if (nd !== null) return nd;
-
-  // Strategy 2: text patterns
-  const doc      = new DOMParser().parseFromString(html, 'text/html');
-  const bodyText = (doc.body?.textContent ?? '').toLowerCase();
-
-  if (/no results found|no results for|0 results/.test(bodyText)) return { status: 'not-found' };
-
-  const m = bodyText.match(/(\d[\d,]*)\s+(?:result|book|title)/);
-  if (m) {
-    const n = parseInt(m[1].replace(/,/g, ''));
-    return { status: n > 0 ? 'found' : 'not-found', count: n };
+  // Kobo renders "or free on Kobo Plus" / "FREE with Kobo Plus" on every Plus title card.
+  // That phrase is the definitive signal — if it's in the page, the book is on Plus.
+  if (/free (?:on|with) kobo plus/i.test(html)) {
+    return { status: 'found' };
   }
 
-  // Strategy 3: count DOM elements
-  const items = [...doc.querySelectorAll('article,[class*="result"],[class*="product"],[class*="item"]')]
-    .filter(el => el.textContent.trim().length > 40 && el.tagName !== 'BODY');
+  // Got a real page back but no Plus phrase → not in the subscription.
+  if (html.length > 5000) {
+    return { status: 'not-found' };
+  }
 
-  if (items.length > 0) return { status: 'found', count: items.length };
-
+  // Very short / empty response — proxy may have failed.
   return { status: 'unknown' };
-}
-
-function tryParseNextData(html) {
-  const m = html.match(/<script\s[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
-  if (!m) return null;
-  let nd; try { nd = JSON.parse(m[1]); } catch { return null; }
-
-  const pp = nd?.props?.pageProps;
-  if (!pp) return null;
-
-  for (const c of [pp.searchResults, pp.results, pp.data?.searchResults, pp.data]) {
-    if (!c) continue;
-    const total = c.totalCount ?? c.ResultCount ?? c.total ?? c.count;
-    if (typeof total === 'number') return { status: total > 0 ? 'found' : 'not-found', count: total };
-    const arr = c.items ?? c.books ?? c.Items ?? c.Books;
-    if (Array.isArray(arr)) return { status: arr.length > 0 ? 'found' : 'not-found', count: arr.length };
-  }
-  return null;
 }
 
 /* ══════════════════════════════════════════════
@@ -331,6 +303,7 @@ function buildGoodreadsCard(query) {
            <div class="gr-url-row">
              <input id="gr-url-input" class="gr-url-input" type="url"
                     placeholder="https://www.goodreads.com/user/show/12345"
+                    value="https://www.goodreads.com/user/show/171156-amy"
                     autocomplete="url">
              <button type="submit" class="gr-connect-btn">Connect</button>
            </div>
