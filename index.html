@@ -60,15 +60,23 @@
   <!-- ══ RESULTS ══ -->
   <main id="results" class="results" hidden>
 
-    <!-- Book metadata from Open Library -->
-    <section id="book-meta" class="book-meta" aria-live="polite"></section>
+    <!-- Step 1: Book picker — Open Library search results -->
+    <section class="picker-section">
+      <div class="picker-inner">
+        <p id="picker-heading" class="picker-heading"></p>
+        <div id="picker-list" class="picker-list" role="listbox" aria-label="Book search results"></div>
+      </div>
+    </section>
 
-    <!-- Source cards -->
-    <section class="cards-section">
-      <h2 class="cards-heading">
-        Availability results for <em id="query-display"></em>
-      </h2>
-      <div id="cards-grid" class="cards-grid" role="list"></div>
+    <!-- Step 2: Availability — revealed once a book is selected -->
+    <section id="availability" hidden>
+      <section id="book-meta" class="book-meta" aria-live="polite"></section>
+      <section class="cards-section">
+        <h2 class="cards-heading">
+          Where to find <em id="query-display"></em>
+        </h2>
+        <div id="cards-grid" class="cards-grid" role="list"></div>
+      </section>
     </section>
 
   </main>

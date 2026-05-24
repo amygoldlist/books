@@ -687,6 +687,160 @@ a { color: inherit; }
 .card-cta-secondary:hover { background: #EDE9E0; color: var(--ink); }
 
 /* ══════════════════════════════
+   BOOK PICKER
+══════════════════════════════ */
+.picker-section {
+  max-width: 900px;
+  margin: 2rem auto 0;
+  padding: 0 1.25rem;
+}
+
+.picker-inner { /* intentionally thin wrapper */ }
+
+.picker-heading {
+  font-size: .875rem;
+  font-weight: 500;
+  color: var(--ink-lt);
+  margin-bottom: .85rem;
+  min-height: 1.3em;
+}
+
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: .85rem;
+  width: 100%;
+  padding: .6rem .9rem;
+  background: var(--paper);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  transition: border-color .15s, background .15s, transform .12s;
+}
+
+.picker-item:hover {
+  border-color: var(--olive-lt);
+  background: #FAFAF7;
+  transform: translateX(3px);
+}
+
+.picker-item:active { transform: translateX(3px) scale(.99); }
+
+.picker-item--selected {
+  border-color: var(--olive);
+  background: #EEF2E4;
+  box-shadow: 0 2px 10px rgba(92,107,58,.13);
+  transform: translateX(3px);
+}
+
+.picker-cover {
+  width: 36px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 3px;
+  box-shadow: 1px 2px 6px rgba(0,0,0,.18);
+  flex-shrink: 0;
+  background: var(--cream);
+}
+
+.picker-no-cover {
+  width: 36px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.15rem;
+  background: var(--cream);
+  border-radius: 3px;
+  box-shadow: 1px 2px 6px rgba(0,0,0,.08);
+  flex-shrink: 0;
+}
+
+.picker-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .12rem;
+}
+
+.picker-title {
+  font-size: .9rem;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-byline {
+  font-size: .78rem;
+  color: var(--ink-lt);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-check {
+  font-size: .85rem;
+  color: var(--olive);
+  font-weight: 700;
+  opacity: 0;
+  transition: opacity .15s;
+  flex-shrink: 0;
+}
+
+.picker-item--selected .picker-check { opacity: 1; }
+
+/* Loading / empty / error */
+.picker-loading {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .9rem 0;
+  font-size: .875rem;
+  color: var(--ink-lt);
+}
+
+.picker-empty, .picker-error {
+  padding: .85rem 0;
+  font-size: .875rem;
+  color: var(--ink-lt);
+  line-height: 1.65;
+}
+
+.picker-fallback-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  margin-top: .6rem;
+  padding: .45rem .95rem;
+  font-size: .82rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  background: var(--olive);
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: filter .15s;
+}
+
+.picker-fallback-btn:hover { filter: brightness(1.1); }
+
+/* Availability section gets a little breathing room */
+#availability { padding-top: 1.5rem; }
+
+/* ══════════════════════════════
    RESPONSIVE
 ══════════════════════════════ */
 @media (max-width: 600px) {
