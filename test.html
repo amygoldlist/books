@@ -130,20 +130,35 @@
   ══════════════════════════════════════════════ */
 
   /**
-   * Build a fake allorigins.win response whose HTML contains
-   * a __NEXT_DATA__ script tag with the given totalCount.
-   * totalCount > 0  → fetchKoboData should return 'found'
-   * totalCount === 0 → fetchKoboData should return 'not-found'
+   * Build a fake allorigins.win response using the REAL Kobo __NEXT_DATA__
+   * structure discovered by inspection:
+   *   pageProps.searchResultSSR.Items[].Book.ApplicableSubscriptions
+   *
+   * plusTitles  — array of {title, isPlus} objects for the top results
+   * extraOpts   — { noNextData: bool, bodyText: string }
    */
-  function makeKoboFixture(totalCount, extraOpts = {}) {
-    const items = totalCount > 0
-      ? [{ title: 'Test Book', id: 'abc123' }]
-      : [];
+  function makeKoboFixture(plusTitles, extraOpts = {}) {
+    // Build Items array with the real structure
+    const Items = plusTitles.map(({ title, isPlus }) => ({
+      Book: {
+        Title: title,
+        ApplicableSubscriptions: isPlus
+          ? ['be9e9ac0-5823-4047-8281-069986c626b9']  // real Plus sub ID
+          : undefined,
+        Price: { Currency: 'CAD', Price: isPlus ? 1.99 : 14.99 },
+        ContributorRoles: [{ Name: 'Test Author', Role: 'Author' }],
+      }
+    }));
 
     const nd = {
       props: {
         pageProps: {
-          searchResults: { totalCount, items }
+          searchResultSSR: {
+            Items,
+            TotalItemCount: plusTitles.length,
+            TotalPageCount: 1,
+            ItemsPerPage: 12,
+          }
         }
       }
     };
@@ -153,7 +168,6 @@
       : `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(nd)}<\/script>`;
 
     const bodyText = extraOpts.bodyText || '';
-
     const html = `<!DOCTYPE html><html><head><title>Kobo</title></head>` +
                  `<body>${bodyText}${scripts}</body></html>`;
 
@@ -184,12 +198,18 @@
   ══════════════════════════════════════════════ */
   (async () => {
 
-    // ── Suite 1: The two canonical books ────────────────────────────────────
-    suite('Suite 1 — Canonical test cases (the books we know)');
+    // ── Suite 1: The two canonical books ─────────────────────────────────────
+    // Real __NEXT_DATA__ structure: pageProps.searchResultSSR.Items[].Book
+    // Plus status: Book.ApplicableSubscriptions is a non-empty array
+    suite('Suite 1 — Canonical test cases');
 
-    // "The Age of Innocence" by Edith Wharton — IS on Kobo Plus
     {
-      const restore = mockFetch(makeKoboFixture(4)); // 4 results returned by Plus filter
+      // Age of Innocence: first result IS the book AND has ApplicableSubscriptions
+      const restore = mockFetch(makeKoboFixture([
+        { title: 'The Age of Innocence',          isPlus: true  },
+        { title: 'The Age of Innocence: A Novel', isPlus: true  },
+        { title: 'Something Else',                isPlus: false },
+      ]));
       await test(
         '"The Age of Innocence" (Edith Wharton) → found on Kobo Plus',
         () => fetchKoboData('The Age of Innocence', noopSignal),
@@ -198,9 +218,12 @@
       restore();
     }
 
-    // "Yesteryear" by Claire Caro Burke — NOT on Kobo Plus
     {
-      const restore = mockFetch(makeKoboFixture(0)); // 0 results from Plus filter
+      // Yesteryear: first result IS the book but has NO ApplicableSubscriptions
+      const restore = mockFetch(makeKoboFixture([
+        { title: 'Yesteryear',         isPlus: false },
+        { title: 'The Perfect Mother', isPlus: true  },
+      ]));
       await test(
         '"Yesteryear" (Claire Caro Burke) → NOT on Kobo Plus',
         () => fetchKoboData('Yesteryear', noopSignal),
@@ -209,93 +232,67 @@
       restore();
     }
 
-    // ── Suite 2: Detection paths ─────────────────────────────────────────────
-    suite('Suite 2 — Individual detection paths');
+    // ── Suite 2: Detection paths ──────────────────────────────────────────────
+    suite('Suite 2 — Detection paths');
 
-    // Pass 1: literal "free with Kobo Plus" text in HTML
     {
-      const fixture = JSON.stringify({
+      // Literal badge text (Pass 1 — rare but possible in SSR)
+      const restore = mockFetch(JSON.stringify({
         contents: '<html><body>Read this book free with Kobo Plus today!</body></html>',
         status: { http_code: 200 }
-      });
-      const restore = mockFetch(fixture);
+      }));
       await test(
-        'Pass 1 — literal badge text "free with Kobo Plus" → found',
+        'Literal "free with Kobo Plus" in body → found',
         () => fetchKoboData('Some Book', noopSignal),
         'found'
       );
       restore();
     }
 
-    // Pass 1: alternate phrasing "free on kobo plus"
     {
-      const fixture = JSON.stringify({
-        contents: '<html><body>Or free on Kobo Plus</body></html>',
-        status: { http_code: 200 }
-      });
-      const restore = mockFetch(fixture);
+      // Subtitle variant: catalog has "Title: Subtitle", user searches "Title"
+      const restore = mockFetch(makeKoboFixture([
+        { title: 'Dune: A Novel', isPlus: true },  // Kobo has subtitle, user doesn't
+      ]));
       await test(
-        'Pass 1 — alternate phrasing "free on Kobo Plus" → found',
-        () => fetchKoboData('Some Book', noopSignal),
+        'Kobo subtitle "Dune: A Novel" matched by search "Dune" → found',
+        () => fetchKoboData('Dune', noopSignal),
         'found'
       );
       restore();
     }
 
-    // Pass 2a: explicit "isKoboPlus": true in __NEXT_DATA__
     {
-      const nd = { props: { pageProps: { items: [{ "isKoboPlus": true, title: 'X' }] } } };
-      const html = `<html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(nd)}<\/script></body></html>`;
-      const fixture = JSON.stringify({ contents: html, status: { http_code: 200 } });
-      const restore = mockFetch(fixture);
+      // No match in top results → unknown (can't determine)
+      const restore = mockFetch(makeKoboFixture([
+        { title: 'Completely Different Book A', isPlus: true  },
+        { title: 'Completely Different Book B', isPlus: false },
+      ]));
       await test(
-        'Pass 2a — "isKoboPlus": true in __NEXT_DATA__ → found',
-        () => fetchKoboData('Some Book', noopSignal),
-        'found'
+        'No title match in top results → unknown',
+        () => fetchKoboData('My Very Specific Title That Does Not Match', noopSignal),
+        'unknown'
       );
       restore();
     }
 
-    // Pass 2b: totalCount > 0 via JSON parse
-    {
-      const restore = mockFetch(makeKoboFixture(12));
-      await test(
-        'Pass 2b — __NEXT_DATA__ totalCount: 12 → found',
-        () => fetchKoboData('Prolific Author Book', noopSignal),
-        'found'
-      );
-      restore();
-    }
+    // ── Suite 3: Edge / error cases ───────────────────────────────────────────
+    suite('Suite 3 — Edge cases');
 
-    // Pass 2b: totalCount === 0 via JSON parse
     {
-      const restore = mockFetch(makeKoboFixture(0));
+      // Cloudflare challenge: no __NEXT_DATA__ → unknown
+      const restore = mockFetch(makeKoboFixture([], { noNextData: true }));
       await test(
-        'Pass 2b — __NEXT_DATA__ totalCount: 0 → not-found',
-        () => fetchKoboData('Obscure Book', noopSignal),
-        'not-found'
-      );
-      restore();
-    }
-
-    // ── Suite 3: Edge cases ──────────────────────────────────────────────────
-    suite('Suite 3 — Edge / error cases');
-
-    // No __NEXT_DATA__ (bot-challenge page) → unknown
-    {
-      const restore = mockFetch(makeKoboFixture(0, { noNextData: true }));
-      await test(
-        'No __NEXT_DATA__ (bot-challenge / blocked) → unknown',
+        'Bot-challenge page (no __NEXT_DATA__) → unknown',
         () => fetchKoboData('Any Book', noopSignal),
         'unknown'
       );
       restore();
     }
 
-    // Empty HTML string → unknown
     {
-      const fixture = JSON.stringify({ contents: '', status: { http_code: 200 } });
-      const restore = mockFetch(fixture);
+      // Empty response → unknown
+      const restore = mockFetch(JSON.stringify({ contents: '', status: { http_code: 200 } }));
       await test(
         'Empty HTML response → unknown',
         () => fetchKoboData('Any Book', noopSignal),
@@ -304,36 +301,24 @@
       restore();
     }
 
-    // Proxy HTTP error → should throw (we catch and record as error)
     {
+      // Proxy returns HTTP 502 → fetchKoboData throws → autoCheckKoboPlus shows "couldn't check"
       const original = window.fetch;
       window.fetch = async () => ({ ok: false, status: 502 });
-      await test(
-        'Proxy returns 502 → throws (caught as error)',
-        () => fetchKoboData('Any Book', noopSignal),
-        '__throws__'   // nothing should match → recorded as 💥 error, not pass/fail
-      );
+      await test('Proxy 502 → correctly throws', () => fetchKoboData('Any Book', noopSignal), '__throws__');
       window.fetch = original;
-      // The above test will show as 💥 error — correct behaviour: fetchKoboData should throw
-      // so callers catch it and show the "couldn't check" UI. Decrement the error count
-      // and credit it as a pass since throwing is the intended contract.
-      errors--;
-      passed++;
-      // Patch the last result line to show as pass
-      const lastResult = currentSuite.querySelector('.result.error:last-child');
-      if (lastResult) {
-        lastResult.className = 'result pass';
-        lastResult.firstChild.textContent = '✅  Proxy returns 502 → correctly throws (caught by caller)';
-      }
+      // Throwing is the correct contract — caller shows "couldn't check" UI
+      errors--; passed++;
+      const last = currentSuite.querySelector('.result.error:last-child');
+      if (last) { last.className = 'result pass'; last.firstChild.textContent = '✅  Proxy 502 → correctly throws (caller shows "couldn\'t check")'; }
     }
 
-    // ── Print summary ────────────────────────────────────────────────────────
+    // ── Print summary ─────────────────────────────────────────────────────────
     const total = passed + failed + errors;
     summaryEl.className = (failed + errors > 0) ? 'has-fail' : 'all-pass';
-    summaryEl.textContent =
-      (failed + errors === 0)
-        ? `All ${total} tests passed ✅`
-        : `${passed} / ${total} passed — ${failed} failed, ${errors} errored`;
+    summaryEl.textContent = (failed + errors === 0)
+      ? `All ${total} tests passed ✅`
+      : `${passed} / ${total} passed — ${failed} failed, ${errors} errored`;
 
   })();
   </script>

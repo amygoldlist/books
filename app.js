@@ -96,6 +96,10 @@ let olAbort           = null;  // AbortController for Open Library fetch
 let koboAbort         = null;
 let grAbort           = null;
 
+// Kobo Plus catalog — loaded from kobo-plus.json at startup
+let koboCatalog      = null;   // Set<string> of normalised titles, null until loaded
+let koboCatalogReady = null;   // Promise that resolves once the file is fetched
+
 /* ══════════════════════════════════════════════
    DOM REFS
 ══════════════════════════════════════════════ */
@@ -113,7 +117,8 @@ const queryDisplay   = document.getElementById('query-display');
    INIT
 ══════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
-  grUserId = loadGrUserId();
+  grUserId         = loadGrUserId();
+  koboCatalogReady = loadKoboCatalog();  // start fetching in the background
 
   // ── Picker click — delegated to the stable list container ──
   pickerListEl.addEventListener('click', (e) => {
@@ -384,8 +389,83 @@ function setKoboStatus(cls, message) {
                + `<span>${message.slice(2).trimStart()}</span>`;
 }
 
+/* ══════════════════════════════════════════════
+   KOBO PLUS — LOCAL CATALOG
+   Loaded from kobo-plus.json (built by scripts/fetch-kobo-catalog.js).
+   Avoids the Cloudflare bot-challenge that blocks the CORS proxy.
+══════════════════════════════════════════════ */
+
+/** Fetch and parse kobo-plus.json. Called once on startup. */
+function loadKoboCatalog() {
+  return fetch('kobo-plus.json')
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      if (data?.titles?.length) {
+        koboCatalog = new Set(data.titles);
+        console.log(`📚 Kobo Plus catalog: ${koboCatalog.size} titles (updated ${data.updated})`);
+      }
+    })
+    .catch(() => { /* 404 or network error — fall back to live check */ });
+}
+
+/**
+ * Normalise a title for catalog lookup:
+ * lowercase, collapse punctuation → space, strip surrounding whitespace.
+ */
+function normTitle(str) {
+  return str
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Look up a title in the local catalog.
+ * Returns true  (on Kobo Plus),
+ *         false (not on Kobo Plus — catalog is comprehensive),
+ *         null  (catalog not loaded — fall back to live check).
+ *
+ * Handles subtitle variants: "Title: A Novel" ↔ "Title"
+ */
+function lookupKoboCatalog(title) {
+  if (!koboCatalog) return null;
+  const n = normTitle(title);
+  if (koboCatalog.has(n)) return true;
+  // Catalog title may include a subtitle the user didn't type, or vice-versa
+  for (const key of koboCatalog) {
+    if (key.startsWith(n + ' ') || n.startsWith(key + ' ')) return true;
+  }
+  return false;  // not in comprehensive catalog → definitely not on Plus
+}
+
+/* ══════════════════════════════════════════════
+   KOBO PLUS — LIVE CHECK (fallback when catalog absent)
+══════════════════════════════════════════════ */
+
 async function fetchKoboData(title, signal) {
-  const koboUrl  = `https://www.kobo.com/ca/en/search?Query=${encodeURIComponent(title)}&MediaType=ebook&fcis_kobo_plus=true`;
+  // ── Step 1: local catalog (instant, no network, no bot-blocking) ──────────
+  // Wait up to 5 s for the catalog file to finish loading before giving up
+  if (koboCatalogReady) {
+    await Promise.race([
+      koboCatalogReady,
+      new Promise(r => setTimeout(r, 5000)),
+    ]);
+  }
+  const catalogHit = lookupKoboCatalog(title);
+  if (catalogHit === true)  return { status: 'found' };
+  if (catalogHit === false) return { status: 'not-found' };
+
+  // ── Step 2: live CORS-proxy check (fallback — catalog not built yet) ──────
+  // Kobo uses Cloudflare, which blocks most CORS proxies. When blocked the
+  // proxy returns a challenge page with no __NEXT_DATA__ → we return 'unknown'.
+  //
+  // Correct field paths (discovered by inspecting real __NEXT_DATA__):
+  //   pageProps.searchResultSSR.Items[].Book.ApplicableSubscriptions
+  //   Non-empty array = book is on Kobo Plus.
+  //   pageProps.searchResultSSR.TotalItemCount (PascalCase)
+  //   AccessType=Subscription is the reliable Plus-only filter.
+  const koboUrl  = `https://www.kobo.com/ca/en/search?Query=${encodeURIComponent(title)}&MediaType=ebook&AccessType=Subscription`;
   const proxyUrl = ALLORIGINS + encodeURIComponent(koboUrl);
 
   const fetchSignal = (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function')
@@ -397,70 +477,53 @@ async function fetchKoboData(title, signal) {
 
   const data = await resp.json();
   const html = data.contents || '';
-  if ((data.status?.http_code ?? 200) >= 500) throw new Error('kobo error');
+  if ((data.status?.http_code ?? 200) >= 500) throw new Error('kobo server error');
 
-  // ── Pass 1: literal badge text (works when SSR includes it) ───────────────
+  // Pass 1: literal badge text (occasionally present in SSR)
   if (/free (?:with|on) kobo\s*plus/i.test(html)) return { status: 'found' };
 
-  // ── Pass 2: __NEXT_DATA__ ─────────────────────────────────────────────────
-  // Kobo is a Next.js app. Every SSR page contains a <script id="__NEXT_DATA__">
-  // with the full data payload that React uses to hydrate the page.
-  // If this tag is absent we got a bot-challenge page, not real Kobo content.
+  // Pass 2: __NEXT_DATA__ — absent = bot-challenge page, not real Kobo content
   const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
-  if (!ndMatch) return { status: 'unknown' };   // blocked / not a real Kobo page
+  if (!ndMatch) return { status: 'unknown' };   // Cloudflare blocked the proxy
 
-  const rawNd = ndMatch[1];
-
-  // 2a. Search the raw JSON string for explicit Plus field names.
-  //     Kobo's data model may use any of these.
-  if (/koboPlus[^a-zA-Z]|"isKoboPlus"\s*:\s*true|isFreeWithSubscription|FREE_WITH_SUBSCRIPTION/i.test(rawNd)) {
-    return { status: 'found' };
-  }
-
-  // 2b. We searched with fcis_kobo_plus=true, so ANY results = the book is on Plus.
-  //     Parse the data and look for result counts / items arrays.
   try {
-    const nd = JSON.parse(rawNd);
-    const hit = findResultsInNextData(nd);
-    if (hit === true)  return { status: 'found' };
-    if (hit === false) return { status: 'not-found' };
+    const nd  = JSON.parse(ndMatch[1]);
+    const ssr = nd?.props?.pageProps?.searchResultSSR;
+
+    if (ssr) {
+      const normSearch = normTitle(title);
+      const items      = ssr.Items || [];
+
+      // Check top results: find one whose title closely matches the search
+      for (const it of items.slice(0, 6)) {
+        const book     = it.Book;
+        if (!book?.Title) continue;
+        const normBook = normTitle(book.Title);
+
+        // Titles overlap if either is a prefix of the other (handles subtitles)
+        const overlap = normBook.startsWith(normSearch.slice(0, 15))
+                     || normSearch.startsWith(normBook.slice(0, 15));
+        if (!overlap) continue;
+
+        const subs = book.ApplicableSubscriptions;
+        if (Array.isArray(subs) && subs.length > 0) return { status: 'found' };
+        return { status: 'not-found' };   // matched title, no subscription
+      }
+
+      // No close title match — use result count as weaker fallback
+      const total = ssr.TotalItemCount;
+      if (typeof total === 'number') {
+        return { status: total === 0 ? 'not-found' : 'unknown' };
+      }
+    }
   } catch { /* malformed JSON — fall through */ }
 
-  // 2c. Fast string heuristics on the raw JSON if parsing failed
-  if (/"items"\s*:\s*\[\s*\{/.test(rawNd))        return { status: 'found' };     // non-empty
-  if (/"items"\s*:\s*\[\s*\]/.test(rawNd))         return { status: 'not-found' }; // empty
-  if (/"totalCount"\s*:\s*0\b/.test(rawNd))        return { status: 'not-found' };
-  if (/"totalCount"\s*:\s*[1-9]/.test(rawNd))      return { status: 'found' };
+  // String heuristics on raw JSON (absolute last resort)
+  if (/"ApplicableSubscriptions"\s*:\s*\[/.test(html))  return { status: 'found' };
+  if (/"TotalItemCount"\s*:\s*0\b/.test(html))          return { status: 'not-found' };
+  if (/"TotalItemCount"\s*:\s*[1-9]/.test(html))        return { status: 'unknown' };
 
-  // Have real Kobo HTML but genuinely can't determine
   return { status: 'unknown' };
-}
-
-/**
- * Walk the Next.js pageProps looking for search result arrays or total counts.
- * Returns true (results found), false (zero results), or null (can't tell).
- */
-function findResultsInNextData(nd) {
-  const pp = nd?.props?.pageProps;
-  if (!pp) return null;
-
-  // Try several common shapes Kobo might use
-  for (const candidate of [
-    pp.searchResults, pp.results,
-    pp.data?.searchResults, pp.data,
-    pp,
-  ]) {
-    if (!candidate || typeof candidate !== 'object') continue;
-
-    const total = candidate.totalCount ?? candidate.ResultCount
-               ?? candidate.total     ?? candidate.count;
-    if (typeof total === 'number') return total > 0;
-
-    const arr = candidate.items ?? candidate.books
-             ?? candidate.Items ?? candidate.Books ?? candidate.results;
-    if (Array.isArray(arr)) return arr.length > 0;
-  }
-  return null;
 }
 
 /* ══════════════════════════════════════════════
