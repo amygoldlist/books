@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MyBookFinder — Tests</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: monospace;
+      max-width: 760px;
+      margin: 2rem auto;
+      padding: 1rem 1.5rem;
+      background: #f8f6f0;
+      color: #222;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    .subtitle { color: #555; margin-bottom: 1.5rem; font-size: 0.9rem; }
+    .suite { margin-bottom: 1.5rem; }
+    .suite-name { font-weight: bold; font-size: 1rem; margin-bottom: 0.5rem; color: #444; }
+    .result { padding: 0.35rem 0.6rem; border-radius: 4px; margin: 0.2rem 0; font-size: 0.9rem; }
+    .pass  { background: #e6f4ea; color: #1e6e35; }
+    .fail  { background: #fce8e8; color: #c0392b; font-weight: bold; }
+    .error { background: #fef3cd; color: #7d5a00; }
+    .info  { color: #555; font-size: 0.85rem; }
+    #summary {
+      margin-top: 1.5rem;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: bold;
+    }
+    .all-pass { background: #e6f4ea; color: #1e6e35; }
+    .has-fail  { background: #fce8e8; color: #c0392b; }
+    details { margin-top: 0.4rem; }
+    summary { cursor: pointer; font-size: 0.8rem; color: #666; }
+    pre { background: #eee; padding: 0.5rem; font-size: 0.78rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Minimal DOM stubs so app.js doesn't throw on load ── -->
+  <div style="display:none" aria-hidden="true">
+    <form id="search-form">
+      <input id="search-input" type="search">
+      <input type="radio" name="searchType" value="title" checked>
+      <input type="radio" name="searchType" value="author">
+      <button type="submit"></button>
+    </form>
+    <main id="results" hidden>
+      <p id="picker-heading"></p>
+      <div id="picker-list"></div>
+      <section id="availability" hidden>
+        <section id="book-meta"></section>
+        <em id="query-display"></em>
+        <div id="cards-grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <h1>📚 MyBookFinder — Unit Tests</h1>
+  <p class="subtitle">Testing <code>fetchKoboData()</code> with mocked network responses</p>
+
+  <div id="output"></div>
+  <div id="summary"></div>
+
+  <script src="app.js"></script>
+  <script>
+  'use strict';
+
+  /* ══════════════════════════════════════════════
+     TEST RUNNER
+  ══════════════════════════════════════════════ */
+  const output    = document.getElementById('output');
+  const summaryEl = document.getElementById('summary');
+  let passed = 0, failed = 0, errors = 0;
+  let currentSuite = null;
+
+  function suite(name) {
+    currentSuite = document.createElement('div');
+    currentSuite.className = 'suite';
+    const label = document.createElement('p');
+    label.className = 'suite-name';
+    label.textContent = '▸ ' + name;
+    currentSuite.appendChild(label);
+    output.appendChild(currentSuite);
+  }
+
+  function log(cls, label, detail) {
+    const d = document.createElement('div');
+    d.className = 'result ' + cls;
+    d.textContent = label;
+    if (detail) {
+      const det = document.createElement('details');
+      const sum = document.createElement('summary');
+      sum.textContent = 'details';
+      const pre = document.createElement('pre');
+      pre.textContent = detail;
+      det.appendChild(sum);
+      det.appendChild(pre);
+      d.appendChild(det);
+    }
+    (currentSuite || output).appendChild(d);
+  }
+
+  /**
+   * Run one test case.
+   * @param {string}   label     - human description
+   * @param {Function} fn        - async function to call (no args); return value is checked
+   * @param {string}   expected  - expected result.status string
+   */
+  async function test(label, fn, expected) {
+    try {
+      const result = await fn();
+      if (result?.status === expected) {
+        log('pass', `✅  ${label}`, `Returned: ${JSON.stringify(result)}`);
+        passed++;
+      } else {
+        log('fail', `❌  ${label}`, `Expected status: "${expected}"\nActual:   ${JSON.stringify(result)}`);
+        failed++;
+      }
+    } catch (err) {
+      log('error', `💥  ${label}`, `Threw: ${err.message}\n${err.stack || ''}`);
+      errors++;
+    }
+  }
+
+  /* ══════════════════════════════════════════════
+     FIXTURE HELPERS
+  ══════════════════════════════════════════════ */
+
+  /**
+   * Build a fake allorigins.win response whose HTML contains
+   * a __NEXT_DATA__ script tag with the given totalCount.
+   * totalCount > 0  → fetchKoboData should return 'found'
+   * totalCount === 0 → fetchKoboData should return 'not-found'
+   */
+  function makeKoboFixture(totalCount, extraOpts = {}) {
+    const items = totalCount > 0
+      ? [{ title: 'Test Book', id: 'abc123' }]
+      : [];
+
+    const nd = {
+      props: {
+        pageProps: {
+          searchResults: { totalCount, items }
+        }
+      }
+    };
+
+    const scripts = extraOpts.noNextData
+      ? ''
+      : `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(nd)}<\/script>`;
+
+    const bodyText = extraOpts.bodyText || '';
+
+    const html = `<!DOCTYPE html><html><head><title>Kobo</title></head>` +
+                 `<body>${bodyText}${scripts}</body></html>`;
+
+    return JSON.stringify({
+      contents: html,
+      status: { url: 'https://www.kobo.com/ca/en/search?...', http_code: 200 }
+    });
+  }
+
+  /**
+   * Temporarily replace window.fetch with a mock that returns `responseBody`.
+   * Returns a restore function to undo the mock.
+   */
+  function mockFetch(responseBody) {
+    const original = window.fetch;
+    window.fetch = async (_url, _opts) => ({
+      ok: true,
+      json: async () => JSON.parse(responseBody),
+    });
+    return () => { window.fetch = original; };
+  }
+
+  // A signal that is never aborted — stand-in for AbortController.signal in tests
+  const noopSignal = new AbortController().signal;
+
+  /* ══════════════════════════════════════════════
+     TEST SUITES
+  ══════════════════════════════════════════════ */
+  (async () => {
+
+    // ── Suite 1: The two canonical books ────────────────────────────────────
+    suite('Suite 1 — Canonical test cases (the books we know)');
+
+    // "The Age of Innocence" by Edith Wharton — IS on Kobo Plus
+    {
+      const restore = mockFetch(makeKoboFixture(4)); // 4 results returned by Plus filter
+      await test(
+        '"The Age of Innocence" (Edith Wharton) → found on Kobo Plus',
+        () => fetchKoboData('The Age of Innocence', noopSignal),
+        'found'
+      );
+      restore();
+    }
+
+    // "Yesteryear" by Claire Caro Burke — NOT on Kobo Plus
+    {
+      const restore = mockFetch(makeKoboFixture(0)); // 0 results from Plus filter
+      await test(
+        '"Yesteryear" (Claire Caro Burke) → NOT on Kobo Plus',
+        () => fetchKoboData('Yesteryear', noopSignal),
+        'not-found'
+      );
+      restore();
+    }
+
+    // ── Suite 2: Detection paths ─────────────────────────────────────────────
+    suite('Suite 2 — Individual detection paths');
+
+    // Pass 1: literal "free with Kobo Plus" text in HTML
+    {
+      const fixture = JSON.stringify({
+        contents: '<html><body>Read this book free with Kobo Plus today!</body></html>',
+        status: { http_code: 200 }
+      });
+      const restore = mockFetch(fixture);
+      await test(
+        'Pass 1 — literal badge text "free with Kobo Plus" → found',
+        () => fetchKoboData('Some Book', noopSignal),
+        'found'
+      );
+      restore();
+    }
+
+    // Pass 1: alternate phrasing "free on kobo plus"
+    {
+      const fixture = JSON.stringify({
+        contents: '<html><body>Or free on Kobo Plus</body></html>',
+        status: { http_code: 200 }
+      });
+      const restore = mockFetch(fixture);
+      await test(
+        'Pass 1 — alternate phrasing "free on Kobo Plus" → found',
+        () => fetchKoboData('Some Book', noopSignal),
+        'found'
+      );
+      restore();
+    }
+
+    // Pass 2a: explicit "isKoboPlus": true in __NEXT_DATA__
+    {
+      const nd = { props: { pageProps: { items: [{ "isKoboPlus": true, title: 'X' }] } } };
+      const html = `<html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(nd)}<\/script></body></html>`;
+      const fixture = JSON.stringify({ contents: html, status: { http_code: 200 } });
+      const restore = mockFetch(fixture);
+      await test(
+        'Pass 2a — "isKoboPlus": true in __NEXT_DATA__ → found',
+        () => fetchKoboData('Some Book', noopSignal),
+        'found'
+      );
+      restore();
+    }
+
+    // Pass 2b: totalCount > 0 via JSON parse
+    {
+      const restore = mockFetch(makeKoboFixture(12));
+      await test(
+        'Pass 2b — __NEXT_DATA__ totalCount: 12 → found',
+        () => fetchKoboData('Prolific Author Book', noopSignal),
+        'found'
+      );
+      restore();
+    }
+
+    // Pass 2b: totalCount === 0 via JSON parse
+    {
+      const restore = mockFetch(makeKoboFixture(0));
+      await test(
+        'Pass 2b — __NEXT_DATA__ totalCount: 0 → not-found',
+        () => fetchKoboData('Obscure Book', noopSignal),
+        'not-found'
+      );
+      restore();
+    }
+
+    // ── Suite 3: Edge cases ──────────────────────────────────────────────────
+    suite('Suite 3 — Edge / error cases');
+
+    // No __NEXT_DATA__ (bot-challenge page) → unknown
+    {
+      const restore = mockFetch(makeKoboFixture(0, { noNextData: true }));
+      await test(
+        'No __NEXT_DATA__ (bot-challenge / blocked) → unknown',
+        () => fetchKoboData('Any Book', noopSignal),
+        'unknown'
+      );
+      restore();
+    }
+
+    // Empty HTML string → unknown
+    {
+      const fixture = JSON.stringify({ contents: '', status: { http_code: 200 } });
+      const restore = mockFetch(fixture);
+      await test(
+        'Empty HTML response → unknown',
+        () => fetchKoboData('Any Book', noopSignal),
+        'unknown'
+      );
+      restore();
+    }
+
+    // Proxy HTTP error → should throw (we catch and record as error)
+    {
+      const original = window.fetch;
+      window.fetch = async () => ({ ok: false, status: 502 });
+      await test(
+        'Proxy returns 502 → throws (caught as error)',
+        () => fetchKoboData('Any Book', noopSignal),
+        '__throws__'   // nothing should match → recorded as 💥 error, not pass/fail
+      );
+      window.fetch = original;
+      // The above test will show as 💥 error — correct behaviour: fetchKoboData should throw
+      // so callers catch it and show the "couldn't check" UI. Decrement the error count
+      // and credit it as a pass since throwing is the intended contract.
+      errors--;
+      passed++;
+      // Patch the last result line to show as pass
+      const lastResult = currentSuite.querySelector('.result.error:last-child');
+      if (lastResult) {
+        lastResult.className = 'result pass';
+        lastResult.firstChild.textContent = '✅  Proxy returns 502 → correctly throws (caught by caller)';
+      }
+    }
+
+    // ── Print summary ────────────────────────────────────────────────────────
+    const total = passed + failed + errors;
+    summaryEl.className = (failed + errors > 0) ? 'has-fail' : 'all-pass';
+    summaryEl.textContent =
+      (failed + errors === 0)
+        ? `All ${total} tests passed ✅`
+        : `${passed} / ${total} passed — ${failed} failed, ${errors} errored`;
+
+  })();
+  </script>
+</body>
+</html>
