@@ -466,6 +466,201 @@ a { color: inherit; }
 }
 
 /* ══════════════════════════════
+   KOBO PLUS AUTO-CHECK STATUS
+══════════════════════════════ */
+.check-status {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .875rem;
+  font-weight: 500;
+  padding: .25rem 0;
+  min-height: 2rem;
+}
+
+/* Animated spinner used while checking */
+.check-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2.5px solid rgba(123,63,160,.2);
+  border-top-color: #7B3FA0;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: spin .7s linear infinite;
+}
+
+.check-status.checking  { color: var(--ink-lt); }
+.check-status.found     { color: #1B5E20; }
+.check-status.not-found { color: #B71C1C; }
+.check-status.unknown   { color: #BF6900; }
+
+.check-icon { font-size: 1rem; flex-shrink: 0; line-height: 1; }
+
+/* ══════════════════════════════
+   CARDS — FULL-WIDTH & DIVIDER
+══════════════════════════════ */
+
+/* Goodreads card spans both grid columns */
+.card--full { grid-column: 1 / -1; }
+
+/* "Your Library" section label between availability and personal cards */
+.cards-divider {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin: .5rem 0 -.25rem;
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .09em;
+  color: var(--ink-lt);
+}
+
+.cards-divider::before,
+.cards-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ══════════════════════════════
+   GOODREADS CARD INTERNALS
+══════════════════════════════ */
+.badge-personal { background: #F5EFE0; color: #6B4C26; }
+
+/* Status badges */
+.gr-status {
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+}
+
+.gr-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  font-size: .875rem;
+  font-weight: 600;
+  padding: .35em .8em;
+  border-radius: 8px;
+  width: fit-content;
+  line-height: 1.4;
+}
+
+.gr-read      { background: #E8F5E9; color: #1B5E20; }
+.gr-reading   { background: #E3F2FD; color: #0D47A1; }
+.gr-want      { background: #FFF8E1; color: #C65000; }
+.gr-not-found { background: var(--cream); color: var(--ink-lt); border: 1px solid var(--border); }
+
+.gr-meta {
+  font-size: .8rem;
+  color: var(--ink-lt);
+  line-height: 1.5;
+}
+
+.gr-stars { color: #D4A017; letter-spacing: -.04em; }
+
+.gr-match-title {
+  font-size: .8rem;
+  font-style: italic;
+  color: var(--ink-lt);
+}
+
+/* Author search: list of matching books */
+.gr-book-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  margin-top: .15rem;
+}
+
+.gr-book-item {
+  font-size: .8rem;
+  color: var(--ink-lt);
+  padding-left: 1.1em;
+  position: relative;
+}
+
+.gr-book-item::before { content: '·'; position: absolute; left: 0; }
+.gr-book-item.gr-more { font-style: italic; }
+
+/* ── Import area (shown when no library data) ── */
+.import-area {
+  display: flex;
+  flex-direction: column;
+  gap: .65rem;
+  padding: .9rem 1rem;
+  background: var(--cream);
+  border-radius: 8px;
+  border: 1.5px dashed #C8BEB4;
+}
+
+.import-area-title {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--ink-lt);
+}
+
+.import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .5rem .95rem;
+  font-size: .825rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+  width: fit-content;
+}
+
+.import-btn:hover { background: #EDE9E0; border-color: #B0A898; }
+
+.import-hint {
+  font-size: .75rem;
+  color: var(--ink-lt);
+  line-height: 1.55;
+}
+
+.import-hint em { font-style: normal; font-weight: 500; color: var(--ink); }
+
+/* ── Dual-action footer row for Goodreads card ── */
+.card-footer-row {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.card-footer-row .card-cta { flex: 1; }
+
+.card-cta-secondary {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  padding: .65rem .9rem;
+  font-size: .8rem;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  color: var(--ink-lt);
+  background: var(--cream);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+
+.card-cta-secondary:hover { background: #EDE9E0; color: var(--ink); }
+
+/* ══════════════════════════════
    RESPONSIVE
 ══════════════════════════════ */
 @media (max-width: 600px) {

@@ -79,6 +79,16 @@
     <p class="footer-note">Book metadata from <a href="https://openlibrary.org" target="_blank" rel="noopener">Open Library</a> (CC BY).</p>
   </footer>
 
+  <!-- Hidden file input for Goodreads CSV import — triggered via JS -->
+  <input
+    type="file"
+    id="gr-file-input"
+    accept=".csv"
+    class="sr-only"
+    aria-hidden="true"
+    tabindex="-1"
+  >
+
   <script src="app.js"></script>
 </body>
 </html>
