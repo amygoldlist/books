@@ -1,17 +1,12 @@
 /**
  * MyBookFinder — app.js
  *
- * Static-only: everything runs in the browser.
- *
- * VPL / Kobo don't expose CORS-friendly APIs, so we:
- *   • Build deep-link URLs for VPL (physical + ebook) and Kobo Store → open in new tab.
- *   • Auto-check Kobo Plus via the api.allorigins.win CORS proxy, trying three
- *     parse strategies on the returned HTML (Next.js __NEXT_DATA__, text patterns,
- *     DOM element count).
- *   • Goodreads: one-time import of the user's exported CSV → stored in localStorage.
- *     Every search matches the query against the imported library client-side.
- *
- * Book metadata (cover, author, year) is pulled from Open Library (CORS-friendly).
+ * Kobo Plus:  auto-checked via api.allorigins.win CORS proxy.
+ * Goodreads:  live check against the user's public shelf — no CSV needed.
+ *             User enters their Goodreads profile URL once; the ID is saved
+ *             to localStorage and re-used on every subsequent search.
+ * Open Library: book cover / metadata (CORS-friendly, no proxy).
+ * VPL + Kobo Store: deep-link URL, opens in new tab.
  */
 
 'use strict';
@@ -19,14 +14,12 @@
 /* ══════════════════════════════════════════════
    CONSTANTS
 ══════════════════════════════════════════════ */
-const ALLORIGINS     = 'https://api.allorigins.win/get?url=';
-const GR_STORAGE_KEY = 'mybookfinder_gr_library';
-const GR_ACCENT      = '#7B4B00';   // warm book-brown for Goodreads
+const ALLORIGINS   = 'https://api.allorigins.win/get?url=';
+const GR_USER_KEY  = 'mybookfinder_gr_userid';
+const GR_ACCENT    = '#7B4B00';   // warm book-brown
 
 /* ══════════════════════════════════════════════
-   SOURCE DEFINITIONS
-   Every source except Goodreads lives here.
-   getUrl(query, searchType) → full URL string.
+   SOURCE DEFINITIONS  (link-out cards)
 ══════════════════════════════════════════════ */
 const SOURCES = [
   {
@@ -45,7 +38,6 @@ const SOURCES = [
       return `https://vpl.bibliocommons.com/v2/search?query=${q}&searchType=${type}&formatSelect_facet=BOOK`;
     },
   },
-
   {
     id:       'vpl-ebook',
     source:   'Vancouver Public Library',
@@ -62,7 +54,6 @@ const SOURCES = [
       return `https://vpl.bibliocommons.com/v2/search?query=${q}&searchType=${type}&formatSelect_facet=EBOOK`;
     },
   },
-
   {
     id:        'kobo-plus',
     source:    'Kobo Plus',
@@ -71,14 +62,12 @@ const SOURCES = [
     accent:    '#7B3FA0',
     badge:     'Subscription',
     badgeCls:  'badge-sub',
-    autoCheck: true,                // signals buildCard to render a loading state
+    autoCheck: true,
     ctaLabel:  'Open Kobo Plus',
     getUrl(query) {
-      const q = encodeURIComponent(query);
-      return `https://www.kobo.com/ca/en/search?Query=${q}&MediaType=ebook&fcis_kobo_plus=true`;
+      return `https://www.kobo.com/ca/en/search?Query=${encodeURIComponent(query)}&MediaType=ebook&fcis_kobo_plus=true`;
     },
   },
-
   {
     id:       'kobo-store',
     source:   'Kobo Store',
@@ -90,8 +79,7 @@ const SOURCES = [
     desc:     'Purchase the ebook outright from the Kobo Store — own it forever.',
     ctaLabel: 'Search Kobo Store',
     getUrl(query) {
-      const q = encodeURIComponent(query);
-      return `https://www.kobo.com/ca/en/search?Query=${q}&MediaType=ebook`;
+      return `https://www.kobo.com/ca/en/search?Query=${encodeURIComponent(query)}&MediaType=ebook`;
     },
   },
 ];
@@ -101,8 +89,9 @@ const SOURCES = [
 ══════════════════════════════════════════════ */
 let currentQuery      = '';
 let currentSearchType = 'title';
-let grBooks           = [];          // Goodreads library loaded from localStorage
-let koboPlusAbort     = null;        // AbortController for the in-flight Kobo check
+let grUserId          = null;       // Goodreads numeric user ID (string)
+let koboAbort         = null;       // AbortController for Kobo Plus check
+let grAbort           = null;       // AbortController for Goodreads check
 
 /* ══════════════════════════════════════════════
    DOM REFS
@@ -113,23 +102,31 @@ const resultsEl    = document.getElementById('results');
 const bookMetaEl   = document.getElementById('book-meta');
 const cardsGridEl  = document.getElementById('cards-grid');
 const queryDisplay = document.getElementById('query-display');
-const grFileInput  = document.getElementById('gr-file-input');
 
 /* ══════════════════════════════════════════════
    INIT
 ══════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
-  // Load persisted Goodreads library
-  grBooks = loadGrLibrary();
+  grUserId = loadGrUserId();
 
-  // File input → parse CSV when a file is chosen
-  grFileInput.addEventListener('change', handleGrFileChange);
+  // ── Event delegation for Goodreads card interactions ──
+  // (card HTML is rebuilt on each search, so we delegate to the stable grid container)
+  cardsGridEl.addEventListener('submit', (e) => {
+    if (e.target.id === 'gr-connect-form') {
+      e.preventDefault();
+      handleGrConnect();
+    }
+  });
 
-  // Restore from URL query string (bookmarkable links)
+  cardsGridEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('#gr-disconnect-btn');
+    if (btn) handleGrDisconnect();
+  });
+
+  // ── Restore search from URL params ──
   const params = new URLSearchParams(window.location.search);
   const q      = params.get('q');
   const type   = params.get('type') || 'title';
-
   if (q) {
     input.value = q;
     const radio = form.querySelector(`input[name="searchType"][value="${type}"]`);
@@ -147,7 +144,6 @@ form.addEventListener('submit', (e) => {
   const searchType = form.querySelector('input[name="searchType"]:checked').value;
   if (!query) { input.focus(); return; }
 
-  // Reflect in URL so results are shareable / bookmarkable
   history.pushState(null, '', '?' + new URLSearchParams({ q: query, type: searchType }));
   runSearch(query, searchType);
 });
@@ -159,19 +155,17 @@ function runSearch(query, searchType) {
   currentQuery      = query;
   currentSearchType = searchType;
 
+  // Cancel any in-flight async checks
+  koboAbort?.abort();  koboAbort = new AbortController();
+  grAbort?.abort();    grAbort   = new AbortController();
+
   resultsEl.hidden = false;
   queryDisplay.textContent = `"${query}"`;
 
-  // Cancel any in-flight Kobo Plus check from a previous search
-  koboPlusAbort?.abort();
-  koboPlusAbort = new AbortController();
-
-  // Render all cards synchronously (Kobo Plus gets a spinner)
   renderCards(query, searchType);
-
-  // Parallel async work
   fetchBookMeta(query, searchType);
-  autoCheckKoboPlus(query, searchType, koboPlusAbort.signal);
+  autoCheckKoboPlus(query, koboAbort.signal);
+  if (grUserId) autoCheckGoodreads(query, searchType, grAbort.signal);
 
   resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -180,24 +174,17 @@ function runSearch(query, searchType) {
    RENDER CARDS
 ══════════════════════════════════════════════ */
 function renderCards(query, searchType) {
-  const sourceHTML   = SOURCES.map(src => buildCard(src, query, searchType)).join('');
-  const dividerHTML  = `<div class="cards-divider" role="separator"><span>Your Library</span></div>`;
-  const goodreadsHTML = buildGoodreadsCard(query, searchType);
+  const sourceHTML    = SOURCES.map(src => buildCard(src, query, searchType)).join('');
+  const dividerHTML   = `<div class="cards-divider" role="separator"><span>Your Library</span></div>`;
+  const goodreadsHTML = buildGoodreadsCard(query);
 
   cardsGridEl.innerHTML = sourceHTML + dividerHTML + goodreadsHTML;
-
-  // Wire up Goodreads import/update buttons (rendered inside cardsGridEl)
-  cardsGridEl.querySelector('#gr-import-btn')?.addEventListener('click', () => grFileInput.click());
-  cardsGridEl.querySelector('#gr-update-btn')?.addEventListener('click', () => grFileInput.click());
 }
 
-/* ── Standard source card ── */
 function buildCard(src, query, searchType) {
-  const url          = src.getUrl(query, searchType);
-  const isAutoCheck  = !!src.autoCheck;
+  const url = src.getUrl(query, searchType);
 
-  // Kobo Plus: show spinner while checking; others: static description
-  const bodyContent = isAutoCheck
+  const bodyContent = src.autoCheck
     ? `<div id="kobo-plus-status" class="check-status checking" aria-live="polite">
          <span class="check-spinner" aria-hidden="true"></span>
          <span>Checking availability…</span>
@@ -223,10 +210,8 @@ function buildCard(src, query, searchType) {
       <div class="card-footer">
         <a class="card-cta"
            href="${escapeAttr(url)}"
-           target="_blank"
-           rel="noopener noreferrer"
-           style="--accent:${src.accent}"
-           aria-label="${src.ctaLabel} for ${escapeAttr(query)}">
+           target="_blank" rel="noopener noreferrer"
+           style="--accent:${src.accent}">
           ${src.ctaLabel}
           <span class="cta-arrow" aria-hidden="true">↗</span>
         </a>
@@ -236,184 +221,134 @@ function buildCard(src, query, searchType) {
 
 /* ══════════════════════════════════════════════
    KOBO PLUS AUTO-CHECK
-   Strategy order:
-     1. Parse Next.js __NEXT_DATA__ JSON blob (most reliable if Kobo uses Next.js)
-     2. Look for text patterns: "X results", "no results found"
-     3. Count DOM elements that look like book cards
 ══════════════════════════════════════════════ */
-async function autoCheckKoboPlus(query, searchType, signal) {
-  const statusEl = document.getElementById('kobo-plus-status');
-  if (!statusEl) return;
-
+async function autoCheckKoboPlus(query, signal) {
   try {
     const result = await fetchKoboData(query, signal);
     if (signal.aborted) return;
 
-    if (result.status === 'found') {
-      const countNote = result.count ? ` (${result.count} result${result.count !== 1 ? 's' : ''})` : '';
-      updateKoboStatus('found',     `✅ Available on Kobo Plus${countNote}`);
-    } else if (result.status === 'not-found') {
-      updateKoboStatus('not-found', '❌ Not found on Kobo Plus');
-    } else {
-      updateKoboStatus('unknown',   '⚠️ Couldn\'t auto-check — open to verify');
-    }
+    if      (result.status === 'found')
+      setKoboStatus('found',     `✅ Available on Kobo Plus${result.count ? ` (${result.count})` : ''}`);
+    else if (result.status === 'not-found')
+      setKoboStatus('not-found', '❌ Not found on Kobo Plus');
+    else
+      setKoboStatus('unknown',   '⚠️ Couldn\'t auto-check — open to verify');
   } catch (err) {
     if (err.name === 'AbortError') return;
-    updateKoboStatus('unknown', '⚠️ Couldn\'t auto-check — open to verify');
+    setKoboStatus('unknown', '⚠️ Couldn\'t auto-check — open to verify');
   }
 }
 
-function updateKoboStatus(cssClass, message) {
+function setKoboStatus(cls, message) {
   const el = document.getElementById('kobo-plus-status');
   if (!el) return;
-  el.className = `check-status ${cssClass}`;
-  el.innerHTML = `<span class="check-icon" aria-hidden="true">${message.slice(0, 2)}</span><span>${message.slice(2).trimStart()}</span>`;
+  el.className = `check-status ${cls}`;
+  el.innerHTML = `<span class="check-icon" aria-hidden="true">${message.slice(0, 2)}</span>`
+               + `<span>${message.slice(2).trimStart()}</span>`;
 }
 
 async function fetchKoboData(query, signal) {
   const koboUrl  = `https://www.kobo.com/ca/en/search?Query=${encodeURIComponent(query)}&MediaType=ebook&fcis_kobo_plus=true`;
   const proxyUrl = ALLORIGINS + encodeURIComponent(koboUrl);
 
-  // Combine the cancel signal with a hard 14-second timeout if the browser supports it
-  const fetchSignal =
-    (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function')
-      ? AbortSignal.any([signal, AbortSignal.timeout(14000)])
-      : signal;
+  const fetchSignal = (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function')
+    ? AbortSignal.any([signal, AbortSignal.timeout(14000)])
+    : signal;
 
   const resp = await fetch(proxyUrl, { signal: fetchSignal });
-
   if (!resp.ok) throw new Error(`proxy ${resp.status}`);
+
   const data = await resp.json();
+  const html = data.contents || '';
+  if ((data.status?.http_code ?? 200) >= 500) throw new Error('kobo server error');
 
-  const html     = data.contents || '';
-  const httpCode = data.status?.http_code ?? 200;
-
-  if (httpCode === 429 || httpCode >= 500) throw new Error(`kobo ${httpCode}`);
-
-  // ── Strategy 1: Next.js __NEXT_DATA__ ──────────────────────
-  const nd = extractNextData(html);
+  // Strategy 1: Next.js __NEXT_DATA__
+  const nd = tryParseNextData(html);
   if (nd !== null) return nd;
 
-  // ── Strategy 2: Text patterns ──────────────────────────────
-  const parser   = new DOMParser();
-  const doc      = parser.parseFromString(html, 'text/html');
+  // Strategy 2: text patterns
+  const doc      = new DOMParser().parseFromString(html, 'text/html');
   const bodyText = (doc.body?.textContent ?? '').toLowerCase();
 
-  // "no results" language
-  if (/no results found|no results for|0 results/.test(bodyText)) {
-    return { status: 'not-found' };
-  }
+  if (/no results found|no results for|0 results/.test(bodyText)) return { status: 'not-found' };
 
-  // "42 results" / "42 books" / "42 titles"
   const m = bodyText.match(/(\d[\d,]*)\s+(?:result|book|title)/);
   if (m) {
     const n = parseInt(m[1].replace(/,/g, ''));
     return { status: n > 0 ? 'found' : 'not-found', count: n };
   }
 
-  // ── Strategy 3: Count plausible book-card DOM elements ──────
-  const items = [...doc.querySelectorAll('article, [class*="result"], [class*="product"], [class*="item"]')]
+  // Strategy 3: count DOM elements
+  const items = [...doc.querySelectorAll('article,[class*="result"],[class*="product"],[class*="item"]')]
     .filter(el => el.textContent.trim().length > 40 && el.tagName !== 'BODY');
 
   if (items.length > 0) return { status: 'found', count: items.length };
 
-  // Got HTML but couldn't determine result count
   return { status: 'unknown' };
 }
 
-/**
- * Try to extract search result info from a Next.js __NEXT_DATA__ script tag.
- * Returns {status, count} or null if the tag isn't present / unrecognisable.
- */
-function extractNextData(html) {
+function tryParseNextData(html) {
   const m = html.match(/<script\s[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
   if (!m) return null;
-
-  let nd;
-  try { nd = JSON.parse(m[1]); } catch { return null; }
+  let nd; try { nd = JSON.parse(m[1]); } catch { return null; }
 
   const pp = nd?.props?.pageProps;
   if (!pp) return null;
 
-  // Try common Kobo result shapes
-  const candidates = [
-    pp.searchResults, pp.results, pp.data?.searchResults,
-    pp.initialData?.searchResults, pp.searchData, pp.data,
-  ];
-
-  for (const c of candidates) {
+  for (const c of [pp.searchResults, pp.results, pp.data?.searchResults, pp.data]) {
     if (!c) continue;
-
-    // totalCount field
     const total = c.totalCount ?? c.ResultCount ?? c.total ?? c.count;
-    if (typeof total === 'number') {
-      return { status: total > 0 ? 'found' : 'not-found', count: total };
-    }
-
-    // items / books array
-    const arr = c.items ?? c.books ?? c.Items ?? c.Books ?? c.results;
-    if (Array.isArray(arr)) {
-      return { status: arr.length > 0 ? 'found' : 'not-found', count: arr.length };
-    }
+    if (typeof total === 'number') return { status: total > 0 ? 'found' : 'not-found', count: total };
+    const arr = c.items ?? c.books ?? c.Items ?? c.Books;
+    if (Array.isArray(arr)) return { status: arr.length > 0 ? 'found' : 'not-found', count: arr.length };
   }
-
   return null;
 }
 
 /* ══════════════════════════════════════════════
    GOODREADS CARD
 ══════════════════════════════════════════════ */
-function buildGoodreadsCard(query, searchType) {
-  const grSearchUrl = `https://www.goodreads.com/search?q=${encodeURIComponent(query)}`;
-  const hasData     = grBooks.length > 0;
+function buildGoodreadsCard(query) {
+  const grSearchUrl  = `https://www.goodreads.com/search?q=${encodeURIComponent(query)}`;
+  const profileUrl   = grUserId ? `https://www.goodreads.com/review/list/${grUserId}` : null;
 
-  const bookCount = hasData ? grBooks.length.toLocaleString() : '';
-  const badge     = hasData ? `${bookCount} books` : 'Personal';
+  const badge = profileUrl
+    ? `<a href="${escapeAttr(profileUrl)}" target="_blank" rel="noopener noreferrer"
+          class="gr-profile-badge" title="Your Goodreads shelf">My Goodreads ↗</a>`
+    : `<span class="card-badge badge-personal">Personal</span>`;
 
-  let bodySection, footerSection;
+  // Status area — spinner if connected (live check will update it), form if not
+  const statusArea = grUserId
+    ? `<div id="gr-live-status" class="check-status checking" aria-live="polite">
+         <span class="check-spinner" aria-hidden="true"></span>
+         <span>Checking your Goodreads…</span>
+       </div>`
+    : `<div id="gr-live-status">
+         <form class="gr-connect-form" id="gr-connect-form" novalidate>
+           <p class="gr-connect-desc">
+             Connect your Goodreads profile to automatically check whether you've read this.
+           </p>
+           <div class="gr-url-row">
+             <input id="gr-url-input" class="gr-url-input" type="url"
+                    placeholder="https://www.goodreads.com/user/show/12345"
+                    autocomplete="url">
+             <button type="submit" class="gr-connect-btn">Connect</button>
+           </div>
+         </form>
+       </div>`;
 
-  if (!hasData) {
-    // ── No library imported yet ──────────────────────────────
-    bodySection = `
-      <div class="import-area">
-        <p class="import-area-title">📥 Check your reading history</p>
-        <button class="import-btn" id="gr-import-btn" type="button">
-          Import Goodreads CSV
-        </button>
-        <p class="import-hint">
-          In Goodreads: <em>My Books → Import and Export → Export Library</em>.
-          Your data stays in your browser — nothing is uploaded anywhere.
-        </p>
-      </div>`;
-
-    footerSection = `
-      <a class="card-cta"
-         href="${escapeAttr(grSearchUrl)}"
-         target="_blank" rel="noopener noreferrer"
-         style="--accent:${GR_ACCENT}">
-        Search on Goodreads
-        <span class="cta-arrow" aria-hidden="true">↗</span>
-      </a>`;
-  } else {
-    // ── Library loaded — look up the query ───────────────────
-    const statusHtml = buildGrStatusHtml(query, searchType);
-
-    bodySection = statusHtml;
-
-    footerSection = `
-      <div class="card-footer-row">
-        <a class="card-cta"
-           href="${escapeAttr(grSearchUrl)}"
-           target="_blank" rel="noopener noreferrer"
-           style="--accent:${GR_ACCENT}">
-          Search on Goodreads
-          <span class="cta-arrow" aria-hidden="true">↗</span>
-        </a>
-        <button class="card-cta-secondary" id="gr-update-btn" type="button">
-          Update Library
-        </button>
-      </div>`;
-  }
+  const footerContent = grUserId
+    ? `<div class="card-footer-row">
+         <a class="card-cta" href="${escapeAttr(grSearchUrl)}"
+            target="_blank" rel="noopener noreferrer" style="--accent:${GR_ACCENT}">
+           Search on Goodreads <span class="cta-arrow" aria-hidden="true">↗</span>
+         </a>
+         <button id="gr-disconnect-btn" class="card-cta-secondary">Disconnect</button>
+       </div>`
+    : `<a class="card-cta" href="${escapeAttr(grSearchUrl)}"
+          target="_blank" rel="noopener noreferrer" style="--accent:${GR_ACCENT}">
+         Search on Goodreads <span class="cta-arrow" aria-hidden="true">↗</span>
+       </a>`;
 
   return `
     <article class="card card--full" id="card-goodreads" role="listitem">
@@ -427,273 +362,227 @@ function buildGoodreadsCard(query, searchType) {
               <span class="card-title">Your Library</span>
             </div>
           </div>
-          <span class="card-badge badge-personal">${badge}</span>
+          ${badge}
         </div>
-        ${bodySection}
+        ${statusArea}
       </div>
-      <div class="card-footer">${footerSection}</div>
+      <div class="card-footer">${footerContent}</div>
     </article>`;
 }
 
-/** Build the status section inside the Goodreads card based on search type. */
-function buildGrStatusHtml(query, searchType) {
-  if (searchType === 'author') {
-    return buildGrAuthorStatus(query);
-  }
-  return buildGrTitleStatus(query, searchType);
-}
-
-function buildGrTitleStatus(query, searchType) {
-  const match = findBestGrMatch(query, searchType);
-
-  if (!match) {
-    return `
-      <div class="gr-status">
-        <span class="gr-badge gr-not-found">➖ Not in your library</span>
-        <p class="gr-meta">Checked ${grBooks.length.toLocaleString()} books</p>
-      </div>`;
-  }
-
-  const { badgeCls, icon, label } = shelfStyle(match.shelf);
-  const stars   = starStr(match.rating);
-  const dateStr = match.dateRead ? ` · Read ${fmtDate(match.dateRead)}` : '';
-  const ratingStr = match.rating > 0 ? `Rated ${match.rating}/5 ${stars}${dateStr}` : '';
-  const authorStr = match.author ? `by ${escapeHtml(match.author)}` : '';
-
-  const metaParts = [ratingStr, authorStr].filter(Boolean).join(' — ');
-
-  return `
-    <div class="gr-status">
-      <span class="gr-badge ${badgeCls}">${icon} ${label}</span>
-      ${metaParts ? `<p class="gr-meta">${metaParts}</p>` : ''}
-      <p class="gr-match-title">${escapeHtml(match.title)}</p>
-    </div>`;
-}
-
-function buildGrAuthorStatus(query) {
-  const norm = normalise(query);
-  const matches = grBooks.filter(b => {
-    const na = normalise(b.author);
-    return na.includes(norm) || norm.includes(na);
-  });
-
-  if (matches.length === 0) {
-    return `
-      <div class="gr-status">
-        <span class="gr-badge gr-not-found">➖ No books by this author in your library</span>
-        <p class="gr-meta">Checked ${grBooks.length.toLocaleString()} books</p>
-      </div>`;
-  }
-
-  const readCount    = matches.filter(b => b.shelf === 'read').length;
-  const readingCount = matches.filter(b => b.shelf === 'currently-reading').length;
-  const wantCount    = matches.filter(b => b.shelf === 'to-read').length;
-
-  const summaryParts = [
-    readCount    ? `${readCount} read`    : '',
-    readingCount ? `${readingCount} reading` : '',
-    wantCount    ? `${wantCount} to-read` : '',
-  ].filter(Boolean).join(', ');
-
-  const { badgeCls, icon } = readCount > 0
-    ? shelfStyle('read')
-    : readingCount > 0 ? shelfStyle('currently-reading') : shelfStyle('to-read');
-
-  const listItems = matches.slice(0, 4).map(b => {
-    const s = b.rating > 0 ? ` <span class="gr-stars">${starStr(b.rating)}</span>` : '';
-    return `<li class="gr-book-item">${escapeHtml(b.title)}${s}</li>`;
-  }).join('');
-
-  const moreItem = matches.length > 4
-    ? `<li class="gr-book-item gr-more">…and ${matches.length - 4} more</li>`
-    : '';
-
-  return `
-    <div class="gr-status">
-      <span class="gr-badge ${badgeCls}">
-        ${icon} ${matches.length} book${matches.length !== 1 ? 's' : ''} by this author — ${summaryParts}
-      </span>
-      <ul class="gr-book-list">${listItems}${moreItem}</ul>
-    </div>`;
-}
-
-function shelfStyle(shelf) {
-  if (shelf === 'read')              return { badgeCls: 'gr-read',      icon: '✅', label: 'Read it!' };
-  if (shelf === 'currently-reading') return { badgeCls: 'gr-reading',   icon: '📖', label: 'Currently reading' };
-  if (shelf === 'to-read')           return { badgeCls: 'gr-want',      icon: '📌', label: 'On your to-read list' };
-  return                                    { badgeCls: 'gr-want',      icon: '📚', label: 'In your library' };
-}
-
 /* ══════════════════════════════════════════════
-   GOODREADS MATCHING
+   GOODREADS LIVE CHECK
+   Fetches the user's shelf filtered by search query via CORS proxy.
+   Goodreads shelf list is server-rendered (Rails app) — no JS needed.
 ══════════════════════════════════════════════ */
-function findBestGrMatch(query, searchType) {
-  if (grBooks.length === 0) return null;
-
-  const nq = normalise(query);
-  let best  = null;
-  let top   = 0;
-
-  for (const book of grBooks) {
-    const nt = normalise(book.title);
-    const na = normalise(book.author);
-    let score = 0;
-
-    // Title matching (always tried)
-    if      (nt === nq)                               score = 100;
-    else if (nt.startsWith(nq + ' '))                 score =  88;
-    else if (nt.includes(nq))                         score =  72;
-    else if (nq.includes(nt) && nt.length > 5)       score =  55;
-
-    // Author matching (boosted when searchType === 'author')
-    if (na.includes(nq) || nq.includes(na)) {
-      score = searchType === 'author' ? Math.max(score, 85) : Math.max(score, 30);
-    }
-
-    if (score > top) { top = score; best = book; }
+async function autoCheckGoodreads(query, searchType, signal) {
+  try {
+    const result = await fetchGoodreadsShelf(query, grUserId, signal);
+    if (signal.aborted) return;
+    setGrStatus(result);
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    setGrStatus({ status: 'error', message: err.message });
   }
-
-  return top >= 50 ? best : null;
-}
-
-function normalise(s) {
-  return String(s).toLowerCase()
-    .replace(/[^a-z0-9 ]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/* ══════════════════════════════════════════════
-   GOODREADS CSV IMPORT
-══════════════════════════════════════════════ */
-function handleGrFileChange(e) {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  const reader = new FileReader();
-  reader.onload = (evt) => {
-    try {
-      const books = parseGrCSV(evt.target.result);
-      if (books.length === 0) {
-        alert("No books found. Make sure this is a Goodreads export CSV.");
-        return;
-      }
-
-      grBooks = books;
-      saveGrLibrary(books);
-
-      // Re-render the Goodreads card in place (search may or may not be active)
-      if (currentQuery) {
-        const oldCard = document.getElementById('card-goodreads');
-        if (oldCard) {
-          const tmp = document.createElement('div');
-          tmp.innerHTML = buildGoodreadsCard(currentQuery, currentSearchType);
-          const newCard = tmp.firstElementChild;
-          oldCard.replaceWith(newCard);
-          // Re-attach update button
-          newCard.querySelector('#gr-update-btn')?.addEventListener('click', () => grFileInput.click());
-        }
-      }
-    } catch (err) {
-      alert(`Couldn't read the file: ${err.message}`);
-    }
-
-    // Reset so the same file can be selected again if needed
-    e.target.value = '';
-  };
-
-  reader.readAsText(file, 'UTF-8');
 }
 
 /**
- * Parse a Goodreads export CSV.
- * Goodreads wraps all fields in double quotes and uses standard RFC 4180.
- * Returns [{title, author, rating, shelf, dateRead}, …]
+ * Fetch the user's Goodreads shelf searched by query, parse the result.
+ * URL format: /review/list/USER_ID?search%5Bquery%5D=QUERY
+ * Returns {status:'found'|'not-found'|'error'|'private', shelf?, title?, rating?, dateRead?}
  */
-function parseGrCSV(text) {
-  const rows    = splitCSVRows(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
-  if (rows.length < 2) throw new Error('File appears empty');
+async function fetchGoodreadsShelf(query, userId, signal) {
+  const grUrl    = `https://www.goodreads.com/review/list/${userId}`
+                 + `?search%5Bquery%5D=${encodeURIComponent(query)}&sort=title&order=a`;
+  const proxyUrl = ALLORIGINS + encodeURIComponent(grUrl);
 
-  const headers = rows[0];
-  const col     = name => headers.findIndex(h => h.trim() === name);
+  const fetchSignal = (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function')
+    ? AbortSignal.any([signal, AbortSignal.timeout(12000)])
+    : signal;
 
-  const titleI    = col('Title');
-  const authorI   = col('Author');
-  const ratingI   = col('My Rating');
-  const shelfI    = col('Exclusive Shelf');
-  const dateReadI = col('Date Read');
+  const resp = await fetch(proxyUrl, { signal: fetchSignal });
+  if (!resp.ok) throw new Error(`proxy ${resp.status}`);
 
-  if (titleI === -1 || shelfI === -1) {
-    throw new Error('Doesn\'t look like a Goodreads export. Expected columns: Title, Exclusive Shelf');
-  }
+  const data = await resp.json();
+  const http  = data.status?.http_code ?? 200;
+  const html  = data.contents || '';
 
-  return rows.slice(1)
-    .filter(r => r.length > Math.max(titleI, shelfI) && r[titleI]?.trim())
-    .map(r => ({
-      title:    r[titleI].trim(),
-      author:   (r[authorI]   ?? '').trim(),
-      rating:   parseInt(r[ratingI]) || 0,
-      shelf:    (r[shelfI]    ?? '').trim(),
-      dateRead: (r[dateReadI] ?? '').trim(),
-    }));
+  if (http === 401 || http === 403) return { status: 'private' };
+  if (http >= 500) throw new Error(`Goodreads ${http}`);
+
+  return parseGoodreadsHtml(html);
 }
 
-/** RFC 4180 CSV parser — handles quoted fields containing commas and escaped quotes. */
-function splitCSVRows(csv) {
-  const rows   = [];
-  let fields   = [];
-  let field    = '';
-  let inQuotes = false;
-  let i        = 0;
+function parseGoodreadsHtml(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
 
-  while (i < csv.length) {
-    const ch = csv[i];
-
-    if (inQuotes) {
-      if (ch === '"') {
-        if (csv[i + 1] === '"') { field += '"'; i += 2; continue; }  // "" → "
-        inQuotes = false;
-      } else {
-        field += ch;
-      }
-    } else {
-      if      (ch === '"')  { inQuotes = true; }
-      else if (ch === ',')  { fields.push(field); field = ''; }
-      else if (ch === '\n') {
-        fields.push(field);
-        rows.push(fields);
-        fields = []; field = '';
-        i++; continue;
-      } else {
-        field += ch;
-      }
-    }
-    i++;
+  // The reading list table
+  const booksBody = doc.querySelector('#booksBody');
+  if (!booksBody) {
+    // Could be a login redirect or a profile that has the list hidden
+    return { status: 'error', message: 'Could not read shelf — profile may be private' };
   }
 
-  // Trailing row (no final newline)
-  fields.push(field);
-  if (fields.some(f => f.trim())) rows.push(fields);
+  const rows = [...booksBody.querySelectorAll('tr.bookalike')];
+  if (rows.length === 0) return { status: 'not-found' };
 
-  return rows;
+  // Take the first (best-ranked by Goodreads search) result
+  const row = rows[0];
+
+  // Title
+  const titleEl  = row.querySelector('.field.title .value a');
+  const titleText = titleEl?.textContent?.trim() || '';
+
+  // Shelf — look for a link like /review/list/xxx?shelf=read
+  const shelfLink = row.querySelector('.field.shelves .value a, .field.shelves a');
+  let shelf = shelfLink?.textContent?.trim().toLowerCase()
+           || (shelfLink?.href?.match(/shelf=([^&]+)/)?.[1] ?? 'read');
+  if (shelf.includes('currently')) shelf = 'currently-reading';
+
+  // Rating — staticStars title attribute → numeric
+  const starsEl = row.querySelector('.field.rating .staticStars');
+  const rating  = ratingFromTitle(starsEl?.getAttribute('title') ?? '');
+
+  // Date read
+  const dateEl   = row.querySelector('.field.date_read .date_read_value');
+  const dateText = dateEl?.textContent?.trim() || '';
+
+  return { status: 'found', shelf, title: titleText, rating, dateRead: dateText };
+}
+
+/** Maps Goodreads star-title strings to 1–5, or 0 if unrated. */
+function ratingFromTitle(text) {
+  return { 'did not like it': 1, 'it was ok': 2, 'liked it': 3,
+           'really liked it': 4, 'it was amazing': 5 }[text.toLowerCase()] ?? 0;
+}
+
+/** Update the #gr-live-status element in place (no full card rebuild). */
+function setGrStatus(result) {
+  const el = document.getElementById('gr-live-status');
+  if (!el) return;
+
+  el.className = 'gr-status';  // clear spinner classes
+
+  if (result.status === 'not-found') {
+    el.innerHTML = `<span class="gr-badge gr-not-found">➖ Not in your Goodreads library</span>`;
+    return;
+  }
+
+  if (result.status === 'private') {
+    el.innerHTML = `<span class="gr-badge gr-not-found">🔒 Profile appears private — <a href="https://www.goodreads.com/user/show/${grUserId}" target="_blank" rel="noopener">check on Goodreads</a></span>`;
+    return;
+  }
+
+  if (result.status === 'error') {
+    el.innerHTML = `<span class="gr-badge gr-not-found">⚠️ Couldn't check — open to verify</span>`;
+    return;
+  }
+
+  // Found!
+  const { shelf, title, rating, dateRead } = result;
+  const { badgeCls, icon, label } = shelfStyle(shelf);
+
+  const stars   = rating > 0 ? `<span class="gr-stars">${starStr(rating)}</span>` : '';
+  const dateTxt = dateRead ? ` · ${dateRead}` : '';
+  const meta    = stars || dateTxt ? `<p class="gr-meta">${stars}${dateTxt}</p>` : '';
+
+  el.innerHTML = `
+    <span class="gr-badge ${badgeCls}">${icon} ${label}</span>
+    ${meta}
+    ${title ? `<p class="gr-match-title">${escapeHtml(title)}</p>` : ''}`;
 }
 
 /* ══════════════════════════════════════════════
-   GOODREADS PERSISTENCE
+   GOODREADS CONNECT / DISCONNECT
 ══════════════════════════════════════════════ */
-function saveGrLibrary(books) {
-  try { localStorage.setItem(GR_STORAGE_KEY, JSON.stringify(books)); } catch {}
+function handleGrConnect() {
+  const urlInput = document.getElementById('gr-url-input');
+  const raw = urlInput?.value.trim() || '';
+
+  const userId = extractGrUserId(raw);
+  if (!userId) {
+    urlInput?.focus();
+    urlInput?.select();
+    // Show a brief shake / validation hint
+    urlInput?.setCustomValidity('Enter a Goodreads profile URL, e.g. goodreads.com/user/show/12345');
+    urlInput?.reportValidity();
+    return;
+  }
+  urlInput?.setCustomValidity('');
+
+  grUserId = userId;
+  saveGrUserId(userId);
+
+  // Swap the form for a spinner immediately
+  const statusEl = document.getElementById('gr-live-status');
+  if (statusEl) {
+    statusEl.className = 'check-status checking';
+    statusEl.innerHTML = `<span class="check-spinner" aria-hidden="true"></span>
+                          <span>Checking your Goodreads…</span>`;
+  }
+
+  // Swap footer to show Search + Disconnect buttons
+  const footerEl = document.querySelector('#card-goodreads .card-footer');
+  if (footerEl && currentQuery) {
+    const grSearchUrl = `https://www.goodreads.com/search?q=${encodeURIComponent(currentQuery)}`;
+    footerEl.innerHTML = `
+      <div class="card-footer-row">
+        <a class="card-cta" href="${escapeAttr(grSearchUrl)}"
+           target="_blank" rel="noopener noreferrer" style="--accent:${GR_ACCENT}">
+          Search on Goodreads <span class="cta-arrow" aria-hidden="true">↗</span>
+        </a>
+        <button id="gr-disconnect-btn" class="card-cta-secondary">Disconnect</button>
+      </div>`;
+  }
+
+  // Update the badge to a profile link
+  const oldBadge = document.querySelector('#card-goodreads .card-badge, #card-goodreads .gr-profile-badge');
+  if (oldBadge) {
+    const profileUrl = `https://www.goodreads.com/review/list/${userId}`;
+    const link = document.createElement('a');
+    link.href = profileUrl; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.className = 'gr-profile-badge'; link.textContent = 'My Goodreads ↗';
+    oldBadge.replaceWith(link);
+  }
+
+  // Kick off the live check
+  if (currentQuery) {
+    grAbort?.abort();
+    grAbort = new AbortController();
+    autoCheckGoodreads(currentQuery, currentSearchType, grAbort.signal);
+  }
 }
 
-function loadGrLibrary() {
-  try {
-    const raw = localStorage.getItem(GR_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
+function handleGrDisconnect() {
+  grUserId = null;
+  clearGrUserId();
+  grAbort?.abort();
+
+  // Rebuild just the Goodreads card
+  const oldCard = document.getElementById('card-goodreads');
+  if (oldCard && currentQuery) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = buildGoodreadsCard(currentQuery);
+    oldCard.replaceWith(tmp.firstElementChild);
+    // Event delegation handles the reconnect form automatically
+  }
 }
+
+/** Extract numeric user ID from any Goodreads URL format. */
+function extractGrUserId(url) {
+  // https://www.goodreads.com/user/show/171156-amy
+  // https://www.goodreads.com/review/list/171156
+  // 171156  (bare ID)
+  const m = url.match(/(?:user\/show|review\/list)\/(\d+)/) || url.match(/^(\d+)$/);
+  return m ? m[1] : null;
+}
+
+function loadGrUserId()      { return localStorage.getItem(GR_USER_KEY) || null; }
+function saveGrUserId(id)    { try { localStorage.setItem(GR_USER_KEY, id); } catch {} }
+function clearGrUserId()     { try { localStorage.removeItem(GR_USER_KEY); } catch {} }
 
 /* ══════════════════════════════════════════════
-   OPEN LIBRARY METADATA (unchanged)
+   OPEN LIBRARY METADATA
 ══════════════════════════════════════════════ */
 async function fetchBookMeta(query, searchType) {
   bookMetaEl.innerHTML = `<p class="meta-loading">Looking up book info…</p>`;
@@ -707,15 +596,10 @@ async function fetchBookMeta(query, searchType) {
       `https://openlibrary.org/search.json?${param}&limit=5&fields=title,author_name,cover_i,first_publish_year,key`,
       { signal: AbortSignal.timeout(8000) }
     );
-
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) throw new Error();
     const data = await resp.json();
-
-    if (data.docs?.length > 0) {
-      renderBookMeta(data.docs[0]);
-    } else {
-      bookMetaEl.innerHTML = '';
-    }
+    if (data.docs?.length > 0) renderBookMeta(data.docs[0]);
+    else bookMetaEl.innerHTML = '';
   } catch {
     bookMetaEl.innerHTML = '';
   }
@@ -729,22 +613,18 @@ function renderBookMeta(book) {
   const year   = book.first_publish_year || null;
   const olKey  = book.key || '';
 
-  const coverHtml = coverSrc
-    ? `<img src="${escapeAttr(coverSrc)}" alt="Cover of ${title}" class="book-cover" loading="lazy" width="80">`
-    : `<div class="book-cover-placeholder" aria-hidden="true">📖</div>`;
-
   bookMetaEl.innerHTML = `
     <div class="book-preview">
-      ${coverHtml}
+      ${coverSrc
+        ? `<img src="${escapeAttr(coverSrc)}" alt="Cover of ${title}" class="book-cover" loading="lazy" width="80">`
+        : `<div class="book-cover-placeholder" aria-hidden="true">📖</div>`}
       <div class="book-details">
         <p class="book-title-meta">${title}</p>
         ${author ? `<p class="book-author-meta">by ${author}</p>` : ''}
         ${year   ? `<p class="book-year-meta">First published ${year}</p>` : ''}
         <a class="book-ol-link"
            href="https://openlibrary.org${escapeAttr(olKey)}"
-           target="_blank" rel="noopener noreferrer">
-          View on Open Library ↗
-        </a>
+           target="_blank" rel="noopener noreferrer">View on Open Library ↗</a>
       </div>
     </div>`;
 }
@@ -752,22 +632,14 @@ function renderBookMeta(book) {
 /* ══════════════════════════════════════════════
    UTILITIES
 ══════════════════════════════════════════════ */
-
-/** "YYYY/MM/DD" → "May 2024"  (Goodreads date format) */
-function fmtDate(dateStr) {
-  if (!dateStr) return '';
-  const parts = dateStr.split('/');
-  if (parts.length === 3) {
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const m = parseInt(parts[1]) - 1;
-    if (m >= 0 && m < 12) return `${months[m]} ${parts[0]}`;
-  }
-  return dateStr;
+function shelfStyle(shelf) {
+  if (shelf === 'read')              return { badgeCls: 'gr-read',    icon: '✅', label: 'Read it!' };
+  if (shelf === 'currently-reading') return { badgeCls: 'gr-reading', icon: '📖', label: 'Currently reading' };
+  if (shelf === 'to-read')           return { badgeCls: 'gr-want',    icon: '📌', label: 'On your to-read list' };
+  return                                    { badgeCls: 'gr-want',    icon: '📚', label: 'In your library' };
 }
 
-/** rating 1-5 → filled + empty stars */
 function starStr(rating) {
-  if (!rating || rating < 1) return '';
   const r = Math.min(5, Math.max(1, rating));
   return '★'.repeat(r) + '☆'.repeat(5 - r);
 }
@@ -780,6 +652,6 @@ function escapeHtml(str) {
 
 function escapeAttr(str) {
   return String(str)
-    .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    .replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }

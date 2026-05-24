@@ -587,49 +587,75 @@ a { color: inherit; }
 .gr-book-item::before { content: '·'; position: absolute; left: 0; }
 .gr-book-item.gr-more { font-style: italic; }
 
-/* ── Import area (shown when no library data) ── */
-.import-area {
+/* ── Goodreads connect form (shown when no profile linked) ── */
+.gr-connect-form {
   display: flex;
   flex-direction: column;
-  gap: .65rem;
-  padding: .9rem 1rem;
-  background: var(--cream);
-  border-radius: 8px;
-  border: 1.5px dashed #C8BEB4;
+  gap: .6rem;
 }
 
-.import-area-title {
-  font-size: .8rem;
-  font-weight: 600;
-  color: var(--ink-lt);
-}
-
-.import-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: .4rem;
-  padding: .5rem .95rem;
-  font-size: .825rem;
-  font-weight: 600;
-  font-family: var(--font-sans);
-  background: var(--paper);
-  color: var(--ink);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  cursor: pointer;
-  transition: background .15s, border-color .15s;
-  width: fit-content;
-}
-
-.import-btn:hover { background: #EDE9E0; border-color: #B0A898; }
-
-.import-hint {
-  font-size: .75rem;
+.gr-connect-desc {
+  font-size: .875rem;
   color: var(--ink-lt);
   line-height: 1.55;
 }
 
-.import-hint em { font-style: normal; font-weight: 500; color: var(--ink); }
+.gr-url-row {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+
+.gr-url-input {
+  flex: 1;
+  min-width: 0;
+  padding: .55rem .8rem;
+  font-size: .8rem;
+  font-family: var(--font-sans);
+  border: 1.5px solid var(--border);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink);
+  outline: none;
+  transition: border-color .2s;
+}
+
+.gr-url-input:focus { border-color: #7B4B00; }
+
+.gr-url-input::placeholder { color: var(--ink-lt); font-size: .75rem; }
+
+.gr-connect-btn {
+  padding: .55rem 1rem;
+  font-size: .82rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  background: #7B4B00;
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: filter .15s;
+}
+
+.gr-connect-btn:hover { filter: brightness(1.12); }
+
+/* Badge that doubles as a link to the user's profile */
+.gr-profile-badge {
+  font-size: .7rem;
+  font-weight: 600;
+  padding: .2em .6em;
+  border-radius: 99px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  background: #F5EFE0;
+  color: #6B4C26;
+  text-decoration: none;
+  transition: opacity .15s;
+}
+
+.gr-profile-badge:hover { opacity: .75; }
 
 /* ── Dual-action footer row for Goodreads card ── */
 .card-footer-row {
